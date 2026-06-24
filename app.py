@@ -114,11 +114,13 @@ def generate_field_questions(field: str, count: int) -> list[dict]:
     return questions
 
 
-def start_quiz(mode: str, questions: list[dict]) -> None:
+def start_quiz(mode: str, questions: list[dict], study_mode: str) -> None:
     st.session_state.quiz = {
         "mode": mode,
+        "study_mode": study_mode,  # review / practice
         "questions": questions,
         "answers": {},
+        "revealed": [],  # 復習モードで判定済みの問題ID
         "current": 0,
         "submitted": False,
         "result": None,
@@ -214,12 +216,18 @@ def render_setup() -> None:
 
     st.subheader("演習モード")
     mode = st.radio("モードを選択", ["本番形式（50問）", "分野別（短時間復習）"], horizontal=True)
+    study_mode_label = st.radio(
+        "解答スタイル",
+        ["復習モード（1問ごとに正解・解説を表示）", "実践モード（最後にまとめて採点）"],
+        horizontal=True,
+    )
+    study_mode = "review" if study_mode_label.startswith("復習モード") else "practice"
 
     if mode == "本番形式（50問）":
         st.write("実試験の構成比（権利14 / 業法20 / 法令8 / 税その他8）で50問を出題します。")
         if st.button("本番形式を開始", type="primary", use_container_width=True):
             questions = generate_mock_questions()
-            start_quiz("mock", questions)
+            start_quiz("mock", questions, study_mode)
             st.rerun()
     else:
         fields = list(COMPOSITION.keys())
@@ -228,7 +236,7 @@ def render_setup() -> None:
         count = st.slider("問題数", min_value=5, max_value=max_count, value=min(10, max_count), step=1)
         if st.button("分野別演習を開始", type="primary", use_container_width=True):
             questions = generate_field_questions(field, count)
-            start_quiz("field", questions)
+            start_quiz("field", questions, study_mode)
             st.rerun()
 
     with st.expander("合格推定ラインの考え方"):
@@ -242,26 +250,33 @@ def render_quiz() -> None:
     total = len(questions)
     idx = quiz["current"]
     q = questions[idx]
+    study_mode = quiz.get("study_mode", "practice")
+    is_review = study_mode == "review"
+    revealed_set = set(quiz.get("revealed", []))
+    qid = q["id"]
+    is_revealed = qid in revealed_set
 
     st.subheader("📝 演習中")
     st.progress((idx + 1) / total, text=f"進捗 {idx + 1}/{total}")
+    st.caption(f"現在の解答スタイル: {'復習モード' if is_review else '実践モード'}")
     st.markdown(
         f"<span class='pill'>{q['field']}</span><span class='pill'>出題傾向 {q['year']}</span>",
         unsafe_allow_html=True,
     )
     st.write(f"**Q{idx + 1}. {q['question']}**")
 
-    key = f"ans_{q['id']}"
-    prev_val = quiz["answers"].get(q["id"])
+    key = f"ans_{qid}"
+    prev_val = quiz["answers"].get(qid)
     default_index = prev_val if prev_val is not None else 0
     choice = st.radio(
         "選択肢",
         q["choices"],
         index=default_index,
         key=key,
+        disabled=is_review and is_revealed,
     )
     picked_index = q["choices"].index(choice)
-    quiz["answers"][q["id"]] = picked_index
+    quiz["answers"][qid] = picked_index
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -273,22 +288,43 @@ def render_quiz() -> None:
             quiz["current"] += 1
             st.rerun()
     with col3:
-        can_submit = len(quiz["answers"]) == total
-        if st.button("採点する", type="primary", use_container_width=True, disabled=not can_submit):
-            result = score_quiz(quiz)
-            quiz["submitted"] = True
-            quiz["result"] = result
-            st.session_state.history.append(
-                {
-                    "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "mode": quiz["mode"],
-                    "score": f"{result['correct']}/{result['total']}",
-                    "rate": f"{result['rate'] * 100:.1f}%",
-                }
-            )
-            st.rerun()
+        if is_review:
+            if not is_revealed:
+                if st.button("この回答で判定", type="primary", use_container_width=True):
+                    revealed_set.add(qid)
+                    quiz["revealed"] = list(revealed_set)
+                    if idx < total - 1:
+                        quiz["current"] += 1
+                    st.rerun()
+            else:
+                st.button("判定済み", use_container_width=True, disabled=True)
 
-    st.caption(f"回答済み: {len(quiz['answers'])}/{total}")
+    if is_review and is_revealed:
+        if quiz["answers"].get(qid) == q["answer"]:
+            st.success(f"正解: {q['choices'][q['answer']]}")
+        else:
+            st.error(f"不正解: 正解は「{q['choices'][q['answer']]}」です")
+        st.info(f"解説: {q['explanation']}")
+
+    can_submit = (len(revealed_set) == total) if is_review else (len(quiz["answers"]) == total)
+    submit_label = "全体結果を見る" if is_review else "採点する"
+    if st.button(submit_label, type="primary", use_container_width=True, disabled=not can_submit, key="final_submit"):
+        result = score_quiz(quiz)
+        quiz["submitted"] = True
+        quiz["result"] = result
+        st.session_state.history.append(
+            {
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "mode": f"{'本番' if quiz['mode'] == 'mock' else '分野別'}-{'復習' if is_review else '実践'}",
+                "score": f"{result['correct']}/{result['total']}",
+                "rate": f"{result['rate'] * 100:.1f}%",
+            }
+        )
+        st.rerun()
+
+    progress_label = "判定済み" if is_review else "回答済み"
+    current_progress = len(revealed_set) if is_review else len(quiz["answers"])
+    st.caption(f"{progress_label}: {current_progress}/{total}")
 
 
 def render_result() -> None:
@@ -297,6 +333,7 @@ def render_result() -> None:
     assert result is not None
 
     st.subheader("✅ 採点結果")
+    st.caption(f"解答スタイル: {'復習モード' if quiz.get('study_mode') == 'review' else '実践モード'}")
     c1, c2, c3 = st.columns(3)
     c1.metric("得点", f"{result['correct']} / {result['total']}")
     c2.metric("正答率", f"{result['rate'] * 100:.1f}%")
