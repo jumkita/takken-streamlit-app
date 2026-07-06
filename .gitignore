@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .DS_Store
 .streamlit/secrets.toml
+data/pdfs/
+data/*_extract*.txt
+data/retio_extract_log.txt

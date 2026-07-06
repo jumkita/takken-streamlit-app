@@ -8,6 +8,7 @@ from datetime import datetime
 import streamlit as st
 
 from question_bank import COMPOSITION, PASS_HISTORY, QUESTION_BANK
+from data_loader import load_question_bank
 
 
 st.set_page_config(
@@ -49,6 +50,10 @@ def init_state() -> None:
         st.session_state.quiz = None
     if "history" not in st.session_state:
         st.session_state.history = []
+    if "question_bank" not in st.session_state or "question_source" not in st.session_state:
+        questions, source = load_question_bank()
+        st.session_state.question_bank = questions
+        st.session_state.question_source = source
 
 
 def require_access_key() -> None:
@@ -96,8 +101,9 @@ def estimate_pass_line(questions: list[dict]) -> int:
 
 def generate_mock_questions() -> list[dict]:
     picked = []
+    bank = st.session_state.question_bank
     for field, count in COMPOSITION.items():
-        pool = [q for q in QUESTION_BANK if q["field"] == field]
+        pool = [q for q in bank if q["field"] == field]
         if len(pool) < count:
             raise ValueError(f"{field} の問題数が不足しています。必要:{count}, 現在:{len(pool)}")
         picked.extend(random.sample(pool, count))
@@ -106,7 +112,8 @@ def generate_mock_questions() -> list[dict]:
 
 
 def generate_field_questions(field: str, count: int) -> list[dict]:
-    pool = [q for q in QUESTION_BANK if q["field"] == field]
+    bank = st.session_state.question_bank
+    pool = [q for q in bank if q["field"] == field]
     if count > len(pool):
         count = len(pool)
     questions = random.sample(pool, count)
@@ -203,6 +210,13 @@ def to_result_csv(result: dict, quiz: dict) -> bytes:
 def render_setup() -> None:
     st.title("🏠 宅建 直前ブースター")
     st.caption("スマホでも使える、直前期向けの4択復習アプリ")
+    source = st.session_state.question_source
+    if source == "default":
+        st.info("現在は内蔵のオリジナル問題を使用中です。")
+    elif source == "json":
+        st.success("`data/user_question_bank.json` を読み込み中（あなたの問題データ）。")
+    elif source == "csv":
+        st.success("`data/user_question_bank.csv` を読み込み中（あなたの問題データ）。")
 
     st.markdown(
         """
@@ -230,9 +244,9 @@ def render_setup() -> None:
             start_quiz("mock", questions, study_mode)
             st.rerun()
     else:
-        fields = list(COMPOSITION.keys())
+        fields = sorted(set(q["field"] for q in st.session_state.question_bank))
         field = st.selectbox("分野", fields, index=0)
-        max_count = len([q for q in QUESTION_BANK if q["field"] == field])
+        max_count = len([q for q in st.session_state.question_bank if q["field"] == field])
         count = st.slider("問題数", min_value=5, max_value=max_count, value=min(10, max_count), step=1)
         if st.button("分野別演習を開始", type="primary", use_container_width=True):
             questions = generate_field_questions(field, count)
@@ -293,8 +307,6 @@ def render_quiz() -> None:
                 if st.button("この回答で判定", type="primary", use_container_width=True):
                     revealed_set.add(qid)
                     quiz["revealed"] = list(revealed_set)
-                    if idx < total - 1:
-                        quiz["current"] += 1
                     st.rerun()
             else:
                 st.button("判定済み", use_container_width=True, disabled=True)
